@@ -101,11 +101,11 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
 
-    // Get ggml-sys paths if available (when use-shared-ggml is enabled)
-    let ggml_lib_dir = env::var("DEP_GGML_SYS_ROOT")
+    // Get ggml-rs paths if available (when use-shared-ggml is enabled)
+    let ggml_lib_dir = env::var("DEP_GGML_RS_ROOT")
         .map(|root| PathBuf::from(root).join("lib"))
         .ok();
-    let ggml_include_dir = env::var("DEP_GGML_SYS_INCLUDE")
+    let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
         .map(PathBuf::from)
         .ok();
     let ggml_prefix = ggml_lib_dir.as_ref()
@@ -131,7 +131,7 @@ fn main() {
     } else {
         let mut bindings = bindgen::Builder::default().header("wrapper.h");
 
-        // When use-shared-ggml is enabled, use ggml-sys headers
+        // When use-shared-ggml is enabled, use ggml-rs headers
         if cfg!(feature = "use-shared-ggml") {
             #[cfg(feature = "metal")]
             {
@@ -201,7 +201,7 @@ fn main() {
 
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
-        // Link to shared ggml libraries from ggml-sys
+        // Link to shared ggml libraries from ggml-rs
         println!("cargo:rustc-link-lib=dylib=ggml");
         println!("cargo:rustc-link-lib=dylib=ggml-base");
         println!("cargo:rustc-link-lib=dylib=ggml-cpu");
@@ -250,7 +250,7 @@ fn main() {
         
         // CRITICAL: Tell CMake where to find ggml
         if let Some(ref prefix) = ggml_prefix {
-            // Set CMAKE_PREFIX_PATH to where ggml-sys installed ggml
+            // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
             config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
             // Set ggml_DIR to the cmake config directory
             let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
@@ -280,7 +280,7 @@ fn main() {
         }
         
         // Note: GGML features (cuda, hipblas, vulkan, metal, openblas, intel-sycl) are handled
-        // by the shared ggml-sys library, so we don't configure them here.
+        // by the shared ggml-rs library, so we don't configure them here.
         // We only configure whisper-specific features.
         
         // Configure whisper-specific features (not ggml)

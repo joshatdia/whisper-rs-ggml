@@ -44,7 +44,7 @@ Add `ggml-sys` to the `[dependencies]` section:
 ```toml
 [dependencies]
 # ... existing dependencies ...
-ggml-sys = { git = "https://github.com/your-username/ggml-sys.git", branch = "main", optional = true }
+ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 # OR if using path dependency:
 # ggml-sys = { path = "../../ggml-sys", optional = true }
 ```

@@ -37,10 +37,10 @@ force-debug = []
 openmp = []
 intel-sycl = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
-use-shared-ggml = ["dep:ggml-sys"]
+use-shared-ggml = ["dep:ggml-rs"]
 
 [dependencies]
-ggml-sys = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
+ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [build-dependencies]
 cmake = "0.1"
