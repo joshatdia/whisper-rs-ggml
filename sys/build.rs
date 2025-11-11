@@ -101,6 +101,16 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
 
+    // Get ggml-sys paths if available (when use-shared-ggml is enabled)
+    let ggml_lib_dir = env::var("DEP_GGML_SYS_ROOT")
+        .map(|root| PathBuf::from(root).join("lib"))
+        .ok();
+    let ggml_include_dir = env::var("DEP_GGML_SYS_INCLUDE")
+        .map(PathBuf::from)
+        .ok();
+    let ggml_prefix = ggml_lib_dir.as_ref()
+        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
+
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let whisper_root = out.join("whisper.cpp/");
 
@@ -121,21 +131,50 @@ fn main() {
     } else {
         let mut bindings = bindgen::Builder::default().header("wrapper.h");
 
-        #[cfg(feature = "metal")]
-        {
-            bindings = bindings.header("whisper.cpp/ggml/include/ggml-metal.h");
-        }
-        #[cfg(feature = "vulkan")]
-        {
-            bindings = bindings
-                .header("whisper.cpp/ggml/include/ggml-vulkan.h")
-                .clang_arg("-DGGML_USE_VULKAN=1");
+        // When use-shared-ggml is enabled, use ggml-sys headers
+        if cfg!(feature = "use-shared-ggml") {
+            #[cfg(feature = "metal")]
+            {
+                if let Some(ref include_dir) = ggml_include_dir {
+                    bindings = bindings.header(include_dir.join("ggml-metal.h").to_str().unwrap());
+                }
+            }
+            #[cfg(feature = "vulkan")]
+            {
+                if let Some(ref include_dir) = ggml_include_dir {
+                    bindings = bindings
+                        .header(include_dir.join("ggml-vulkan.h").to_str().unwrap())
+                        .clang_arg("-DGGML_USE_VULKAN=1");
+                }
+            }
+        } else {
+            // Use embedded ggml headers
+            #[cfg(feature = "metal")]
+            {
+                bindings = bindings.header("whisper.cpp/ggml/include/ggml-metal.h");
+            }
+            #[cfg(feature = "vulkan")]
+            {
+                bindings = bindings
+                    .header("whisper.cpp/ggml/include/ggml-vulkan.h")
+                    .clang_arg("-DGGML_USE_VULKAN=1");
+            }
         }
 
-        let bindings = bindings
+        let mut bindings_builder = bindings
             .clang_arg("-I./whisper.cpp/")
-            .clang_arg("-I./whisper.cpp/include")
-            .clang_arg("-I./whisper.cpp/ggml/include")
+            .clang_arg("-I./whisper.cpp/include");
+        
+        // Add GGML include path
+        if cfg!(feature = "use-shared-ggml") {
+            if let Some(ref include_dir) = ggml_include_dir {
+                bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+            }
+        } else {
+            bindings_builder = bindings_builder.clang_arg("-I./whisper.cpp/ggml/include");
+        }
+
+        let bindings = bindings_builder
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .generate();
 
@@ -160,170 +199,284 @@ fn main() {
         return;
     }
 
-    let mut config = Config::new(&whisper_root);
-
-    config
-        .profile("Release")
-        .define("BUILD_SHARED_LIBS", "OFF")
-        .define("WHISPER_ALL_WARNINGS", "OFF")
-        .define("WHISPER_ALL_WARNINGS_3RD_PARTY", "OFF")
-        .define("WHISPER_BUILD_TESTS", "OFF")
-        .define("WHISPER_BUILD_EXAMPLES", "OFF")
-        .very_verbose(true)
-        .pic(true);
-
-    if cfg!(target_os = "windows") {
-        config.cxxflag("/utf-8");
-        println!("cargo:rustc-link-lib=advapi32");
-    }
-
-    if cfg!(feature = "coreml") {
-        config.define("WHISPER_COREML", "ON");
-        config.define("WHISPER_COREML_ALLOW_FALLBACK", "1");
-    }
-
-    if cfg!(feature = "cuda") {
-        config.define("GGML_CUDA", "ON");
-        config.define("CMAKE_POSITION_INDEPENDENT_CODE", "ON");
-        config.define("CMAKE_CUDA_FLAGS", "-Xcompiler=-fPIC");
-    }
-
-    if cfg!(feature = "hipblas") {
-        config.define("GGML_HIP", "ON");
-        config.define("CMAKE_C_COMPILER", "hipcc");
-        config.define("CMAKE_CXX_COMPILER", "hipcc");
-        println!("cargo:rerun-if-env-changed=AMDGPU_TARGETS");
-        if let Ok(gpu_targets) = env::var("AMDGPU_TARGETS") {
-            config.define("AMDGPU_TARGETS", gpu_targets);
+    // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
+    if cfg!(feature = "use-shared-ggml") {
+        // Link to shared ggml libraries from ggml-sys
+        println!("cargo:rustc-link-lib=dylib=ggml");
+        println!("cargo:rustc-link-lib=dylib=ggml-base");
+        println!("cargo:rustc-link-lib=dylib=ggml-cpu");
+        
+        if cfg!(target_os = "macos") || cfg!(feature = "openblas") {
+            println!("cargo:rustc-link-lib=dylib=ggml-blas");
         }
-    }
-
-    if cfg!(feature = "vulkan") {
-        config.define("GGML_VULKAN", "ON");
-        if cfg!(windows) {
-            println!("cargo:rerun-if-env-changed=VULKAN_SDK");
-            println!("cargo:rustc-link-lib=vulkan-1");
-            let vulkan_path = match env::var("VULKAN_SDK") {
-                Ok(path) => PathBuf::from(path),
-                Err(_) => panic!(
-                    "Please install Vulkan SDK and ensure that VULKAN_SDK env variable is set"
-                ),
-            };
-            let vulkan_lib_path = vulkan_path.join("Lib");
-            println!("cargo:rustc-link-search={}", vulkan_lib_path.display());
-        } else if cfg!(target_os = "macos") {
-            println!("cargo:rerun-if-env-changed=VULKAN_SDK");
-            println!("cargo:rustc-link-lib=vulkan");
-            let vulkan_path = match env::var("VULKAN_SDK") {
-                Ok(path) => PathBuf::from(path),
-                Err(_) => panic!(
-                    "Please install Vulkan SDK and ensure that VULKAN_SDK env variable is set"
-                ),
-            };
-            let vulkan_lib_path = vulkan_path.join("lib");
-            println!("cargo:rustc-link-search={}", vulkan_lib_path.display());
-        } else {
-            println!("cargo:rustc-link-lib=vulkan");
+        
+        if cfg!(feature = "vulkan") {
+            println!("cargo:rustc-link-lib=dylib=ggml-vulkan");
         }
-    }
-
-    if cfg!(feature = "openblas") {
-        config.define("GGML_BLAS", "ON");
-        config.define("GGML_BLAS_VENDOR", "OpenBLAS");
-        if env::var("BLAS_INCLUDE_DIRS").is_err() {
-            panic!("BLAS_INCLUDE_DIRS environment variable must be set when using OpenBLAS");
+        
+        if cfg!(feature = "hipblas") {
+            println!("cargo:rustc-link-lib=dylib=ggml-hip");
         }
-        config.define("BLAS_INCLUDE_DIRS", env::var("BLAS_INCLUDE_DIRS").unwrap());
-        println!("cargo:rerun-if-env-changed=BLAS_INCLUDE_DIRS");
-    }
-
-    if cfg!(feature = "metal") {
-        config.define("GGML_METAL", "ON");
-        config.define("GGML_METAL_NDEBUG", "ON");
-        config.define("GGML_METAL_EMBED_LIBRARY", "ON");
-    } else {
-        // Metal is enabled by default, so we need to explicitly disable it
-        config.define("GGML_METAL", "OFF");
-    }
-
-    if cfg!(debug_assertions) || cfg!(feature = "force-debug") {
-        // debug builds are too slow to even remotely be usable,
-        // so we build with optimizations even in debug mode
-        config.define("CMAKE_BUILD_TYPE", "RelWithDebInfo");
-        config.cxxflag("-DWHISPER_DEBUG");
-    } else {
-        // we're in release mode, explicitly set to release mode
-        // see also https://codeberg.org/tazz4843/whisper-rs/issues/226
-        config.define("CMAKE_BUILD_TYPE", "Release");
-    }
-
-    // Allow passing any WHISPER or CMAKE compile flags
-    for (key, value) in env::vars() {
-        let is_whisper_flag =
-            key.starts_with("WHISPER_") && key != "WHISPER_DONT_GENERATE_BINDINGS";
-        let is_cmake_flag = key.starts_with("CMAKE_");
-        if is_whisper_flag || is_cmake_flag {
-            config.define(&key, &value);
+        
+        if cfg!(feature = "metal") {
+            println!("cargo:rustc-link-lib=dylib=ggml-metal");
         }
-    }
-
-    if cfg!(not(feature = "openmp")) {
-        config.define("GGML_OPENMP", "OFF");
-    }
-
-    if cfg!(feature = "intel-sycl") {
-        config.define("BUILD_SHARED_LIBS", "ON");
-        config.define("GGML_SYCL", "ON");
-        config.define("GGML_SYCL_TARGET", "INTEL");
-        config.define("CMAKE_C_COMPILER", "icx");
-        config.define("CMAKE_CXX_COMPILER", "icpx");
-    }
-
-    let destination = config.build();
-
-    add_link_search_path(&out.join("build")).unwrap();
-
-    println!("cargo:rustc-link-search=native={}", destination.display());
-    if cfg!(feature = "intel-sycl") {
-        println!("cargo:rustc-link-lib=whisper");
-        println!("cargo:rustc-link-lib=ggml");
-        println!("cargo:rustc-link-lib=ggml-base");
-        println!("cargo:rustc-link-lib=ggml-cpu");
-    } else {
-        println!("cargo:rustc-link-lib=static=whisper");
-        println!("cargo:rustc-link-lib=static=ggml");
-        println!("cargo:rustc-link-lib=static=ggml-base");
-        println!("cargo:rustc-link-lib=static=ggml-cpu");
-    }
-    if cfg!(target_os = "macos") || cfg!(feature = "openblas") {
-        println!("cargo:rustc-link-lib=static=ggml-blas");
-    }
-    if cfg!(feature = "vulkan") {
+        
+        if cfg!(feature = "cuda") {
+            println!("cargo:rustc-link-lib=dylib=ggml-cuda");
+        }
+        
+        if cfg!(feature = "openblas") {
+            println!("cargo:rustc-link-lib=dylib=ggml-blas");
+        }
+        
         if cfg!(feature = "intel-sycl") {
-            println!("cargo:rustc-link-lib=ggml-vulkan");
-        } else {
-            println!("cargo:rustc-link-lib=static=ggml-vulkan");
+            println!("cargo:rustc-link-lib=dylib=ggml-sycl");
         }
-    }
+        
+        // Build only whisper (not ggml)
+        let mut config = Config::new(&whisper_root);
+        
+        config
+            .profile("Release")
+            .define("BUILD_SHARED_LIBS", "OFF")
+            .define("WHISPER_ALL_WARNINGS", "OFF")
+            .define("WHISPER_ALL_WARNINGS_3RD_PARTY", "OFF")
+            .define("WHISPER_BUILD_TESTS", "OFF")
+            .define("WHISPER_BUILD_EXAMPLES", "OFF")
+            .define("WHISPER_USE_SYSTEM_GGML", "ON")  // Use system ggml (shared library)
+            .very_verbose(true)
+            .pic(true);
+        
+        // CRITICAL: Tell CMake where to find ggml
+        if let Some(ref prefix) = ggml_prefix {
+            // Set CMAKE_PREFIX_PATH to where ggml-sys installed ggml
+            config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
+            // Set ggml_DIR to the cmake config directory
+            let ggml_cmake_dir = prefix.join("lib").join("cmake").join("ggml");
+            if ggml_cmake_dir.exists() {
+                config.define("ggml_DIR", ggml_cmake_dir.to_str().unwrap());
+            }
+        }
+        
+        // Alternative: If CMake config files aren't in the expected location,
+        // you may need to set additional paths
+        if let Some(ref lib_dir) = ggml_lib_dir {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        }
+        if let Some(ref include_dir) = ggml_include_dir {
+            // Add include directory for CMake
+            config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
+        }
+        
+        if cfg!(target_os = "windows") {
+            config.cxxflag("/utf-8");
+            println!("cargo:rustc-link-lib=advapi32");
+        }
+        
+        if cfg!(feature = "coreml") {
+            config.define("WHISPER_COREML", "ON");
+            config.define("WHISPER_COREML_ALLOW_FALLBACK", "1");
+        }
+        
+        // Note: GGML features (cuda, hipblas, vulkan, metal, openblas, intel-sycl) are handled
+        // by the shared ggml-sys library, so we don't configure them here.
+        // We only configure whisper-specific features.
+        
+        // Configure whisper-specific features (not ggml)
+        if cfg!(debug_assertions) || cfg!(feature = "force-debug") {
+            config.define("CMAKE_BUILD_TYPE", "RelWithDebInfo");
+            config.cxxflag("-DWHISPER_DEBUG");
+        } else {
+            config.define("CMAKE_BUILD_TYPE", "Release");
+        }
+        
+        // Allow passing any WHISPER or CMAKE compile flags
+        for (key, value) in env::vars() {
+            let is_whisper_flag =
+                key.starts_with("WHISPER_") && key != "WHISPER_DONT_GENERATE_BINDINGS";
+            let is_cmake_flag = key.starts_with("CMAKE_");
+            if is_whisper_flag || is_cmake_flag {
+                config.define(&key, &value);
+            }
+        }
+        
+        if cfg!(not(feature = "openmp")) {
+            config.define("GGML_OPENMP", "OFF");
+        }
+        
+        let destination = config.build();
+        add_link_search_path(&out.join("build")).unwrap();
+        println!("cargo:rustc-link-search=native={}", destination.display());
+        println!("cargo:rustc-link-lib=static=whisper");
+        
+    } else {
+        // Original code: build whisper with embedded ggml
+        let mut config = Config::new(&whisper_root);
 
-    if cfg!(feature = "hipblas") {
-        println!("cargo:rustc-link-lib=static=ggml-hip");
-    }
+        config
+            .profile("Release")
+            .define("BUILD_SHARED_LIBS", "OFF")
+            .define("WHISPER_ALL_WARNINGS", "OFF")
+            .define("WHISPER_ALL_WARNINGS_3RD_PARTY", "OFF")
+            .define("WHISPER_BUILD_TESTS", "OFF")
+            .define("WHISPER_BUILD_EXAMPLES", "OFF")
+            .very_verbose(true)
+            .pic(true);
 
-    if cfg!(feature = "metal") {
-        println!("cargo:rustc-link-lib=static=ggml-metal");
-    }
+        if cfg!(target_os = "windows") {
+            config.cxxflag("/utf-8");
+            println!("cargo:rustc-link-lib=advapi32");
+        }
 
-    if cfg!(feature = "cuda") {
-        println!("cargo:rustc-link-lib=static=ggml-cuda");
-    }
+        if cfg!(feature = "coreml") {
+            config.define("WHISPER_COREML", "ON");
+            config.define("WHISPER_COREML_ALLOW_FALLBACK", "1");
+        }
 
-    if cfg!(feature = "openblas") {
-        println!("cargo:rustc-link-lib=static=ggml-blas");
-    }
+        if cfg!(feature = "cuda") {
+            config.define("GGML_CUDA", "ON");
+            config.define("CMAKE_POSITION_INDEPENDENT_CODE", "ON");
+            config.define("CMAKE_CUDA_FLAGS", "-Xcompiler=-fPIC");
+        }
 
-    if cfg!(feature = "intel-sycl") {
-        println!("cargo:rustc-link-lib=ggml-sycl");
+        if cfg!(feature = "hipblas") {
+            config.define("GGML_HIP", "ON");
+            config.define("CMAKE_C_COMPILER", "hipcc");
+            config.define("CMAKE_CXX_COMPILER", "hipcc");
+            println!("cargo:rerun-if-env-changed=AMDGPU_TARGETS");
+            if let Ok(gpu_targets) = env::var("AMDGPU_TARGETS") {
+                config.define("AMDGPU_TARGETS", gpu_targets);
+            }
+        }
+
+        if cfg!(feature = "vulkan") {
+            config.define("GGML_VULKAN", "ON");
+            if cfg!(windows) {
+                println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+                println!("cargo:rustc-link-lib=vulkan-1");
+                let vulkan_path = match env::var("VULKAN_SDK") {
+                    Ok(path) => PathBuf::from(path),
+                    Err(_) => panic!(
+                        "Please install Vulkan SDK and ensure that VULKAN_SDK env variable is set"
+                    ),
+                };
+                let vulkan_lib_path = vulkan_path.join("Lib");
+                println!("cargo:rustc-link-search={}", vulkan_lib_path.display());
+            } else if cfg!(target_os = "macos") {
+                println!("cargo:rerun-if-env-changed=VULKAN_SDK");
+                println!("cargo:rustc-link-lib=vulkan");
+                let vulkan_path = match env::var("VULKAN_SDK") {
+                    Ok(path) => PathBuf::from(path),
+                    Err(_) => panic!(
+                        "Please install Vulkan SDK and ensure that VULKAN_SDK env variable is set"
+                    ),
+                };
+                let vulkan_lib_path = vulkan_path.join("lib");
+                println!("cargo:rustc-link-search={}", vulkan_lib_path.display());
+            } else {
+                println!("cargo:rustc-link-lib=vulkan");
+            }
+        }
+
+        if cfg!(feature = "openblas") {
+            config.define("GGML_BLAS", "ON");
+            config.define("GGML_BLAS_VENDOR", "OpenBLAS");
+            if env::var("BLAS_INCLUDE_DIRS").is_err() {
+                panic!("BLAS_INCLUDE_DIRS environment variable must be set when using OpenBLAS");
+            }
+            config.define("BLAS_INCLUDE_DIRS", env::var("BLAS_INCLUDE_DIRS").unwrap());
+            println!("cargo:rerun-if-env-changed=BLAS_INCLUDE_DIRS");
+        }
+
+        if cfg!(feature = "metal") {
+            config.define("GGML_METAL", "ON");
+            config.define("GGML_METAL_NDEBUG", "ON");
+            config.define("GGML_METAL_EMBED_LIBRARY", "ON");
+        } else {
+            // Metal is enabled by default, so we need to explicitly disable it
+            config.define("GGML_METAL", "OFF");
+        }
+
+        if cfg!(debug_assertions) || cfg!(feature = "force-debug") {
+            // debug builds are too slow to even remotely be usable,
+            // so we build with optimizations even in debug mode
+            config.define("CMAKE_BUILD_TYPE", "RelWithDebInfo");
+            config.cxxflag("-DWHISPER_DEBUG");
+        } else {
+            // we're in release mode, explicitly set to release mode
+            // see also https://codeberg.org/tazz4843/whisper-rs/issues/226
+            config.define("CMAKE_BUILD_TYPE", "Release");
+        }
+
+        // Allow passing any WHISPER or CMAKE compile flags
+        for (key, value) in env::vars() {
+            let is_whisper_flag =
+                key.starts_with("WHISPER_") && key != "WHISPER_DONT_GENERATE_BINDINGS";
+            let is_cmake_flag = key.starts_with("CMAKE_");
+            if is_whisper_flag || is_cmake_flag {
+                config.define(&key, &value);
+            }
+        }
+
+        if cfg!(not(feature = "openmp")) {
+            config.define("GGML_OPENMP", "OFF");
+        }
+
+        if cfg!(feature = "intel-sycl") {
+            config.define("BUILD_SHARED_LIBS", "ON");
+            config.define("GGML_SYCL", "ON");
+            config.define("GGML_SYCL_TARGET", "INTEL");
+            config.define("CMAKE_C_COMPILER", "icx");
+            config.define("CMAKE_CXX_COMPILER", "icpx");
+        }
+
+        let destination = config.build();
+
+        add_link_search_path(&out.join("build")).unwrap();
+
+        println!("cargo:rustc-link-search=native={}", destination.display());
+        if cfg!(feature = "intel-sycl") {
+            println!("cargo:rustc-link-lib=whisper");
+            println!("cargo:rustc-link-lib=ggml");
+            println!("cargo:rustc-link-lib=ggml-base");
+            println!("cargo:rustc-link-lib=ggml-cpu");
+        } else {
+            println!("cargo:rustc-link-lib=static=whisper");
+            println!("cargo:rustc-link-lib=static=ggml");
+            println!("cargo:rustc-link-lib=static=ggml-base");
+            println!("cargo:rustc-link-lib=static=ggml-cpu");
+        }
+        if cfg!(target_os = "macos") || cfg!(feature = "openblas") {
+            println!("cargo:rustc-link-lib=static=ggml-blas");
+        }
+        if cfg!(feature = "vulkan") {
+            if cfg!(feature = "intel-sycl") {
+                println!("cargo:rustc-link-lib=ggml-vulkan");
+            } else {
+                println!("cargo:rustc-link-lib=static=ggml-vulkan");
+            }
+        }
+
+        if cfg!(feature = "hipblas") {
+            println!("cargo:rustc-link-lib=static=ggml-hip");
+        }
+
+        if cfg!(feature = "metal") {
+            println!("cargo:rustc-link-lib=static=ggml-metal");
+        }
+
+        if cfg!(feature = "cuda") {
+            println!("cargo:rustc-link-lib=static=ggml-cuda");
+        }
+
+        if cfg!(feature = "openblas") {
+            println!("cargo:rustc-link-lib=static=ggml-blas");
+        }
+
+        if cfg!(feature = "intel-sycl") {
+            println!("cargo:rustc-link-lib=ggml-sycl");
+        }
     }
 
     println!(

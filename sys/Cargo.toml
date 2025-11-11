@@ -36,6 +36,11 @@ vulkan = []
 force-debug = []
 openmp = []
 intel-sycl = []
+# Use shared GGML backend to avoid duplicate symbol conflicts
+use-shared-ggml = ["dep:ggml-sys"]
+
+[dependencies]
+ggml-sys = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [build-dependencies]
 cmake = "0.1"
