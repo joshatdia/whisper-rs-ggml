@@ -390,13 +390,6 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", destination.display());
         println!("cargo:rustc-link-lib=static=whisper");
         
-        // On Windows, copy GGML DLLs to the target directory for runtime
-        if cfg!(target_os = "windows") && cfg!(feature = "use-shared-ggml") {
-            if let Some(ref lib_dir) = ggml_lib_dir {
-                copy_dlls_to_target(lib_dir);
-            }
-        }
-        
     } else {
         // Original code: build whisper with embedded ggml
         let mut config = Config::new(&whisper_root);
@@ -598,46 +591,6 @@ fn add_link_search_path(dir: &std::path::Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// Copy GGML DLLs to the target directory for runtime on Windows
-fn copy_dlls_to_target(lib_dir: &PathBuf) {
-    let target_dir = env::var("OUT_DIR")
-        .ok()
-        .and_then(|out| {
-            PathBuf::from(&out)
-                .ancestors()
-                .nth(3) // Go up from build/.../out to target/debug or target/release
-                .map(|p| p.to_path_buf())
-        });
-    
-    if let Some(target) = target_dir {
-        // Common GGML DLL names
-        let dll_names = [
-            "ggml.dll",
-            "ggml-base.dll",
-            "ggml-cpu.dll",
-            "ggml-cuda.dll",
-            "ggml-vulkan.dll",
-            "ggml-metal.dll",
-            "ggml-hip.dll",
-            "ggml-blas.dll",
-            "ggml-sycl.dll",
-        ];
-        
-        for dll_name in &dll_names {
-            let src = lib_dir.join(dll_name);
-            if src.exists() {
-                let dst = target.join(dll_name);
-                if let Err(e) = std::fs::copy(&src, &dst) {
-                    println!("cargo:warning=Failed to copy {} to {}: {}", 
-                        src.display(), dst.display(), e);
-                } else {
-                    println!("cargo:warning=Copied {} to {}", dll_name, dst.display());
-                }
-            }
-        }
-    }
 }
 
 fn get_whisper_cpp_version(whisper_root: &std::path::Path) -> std::io::Result<Option<String>> {
