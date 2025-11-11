@@ -112,7 +112,7 @@ fn main() {
         .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let whisper_root = out.join("whisper.cpp/");
+    let whisper_root = out.join("whisper.cpp");
 
     if !whisper_root.exists() {
         std::fs::create_dir_all(&whisper_root).unwrap();
@@ -129,7 +129,10 @@ fn main() {
         let _: u64 = std::fs::copy("src/bindings.rs", out.join("bindings.rs"))
             .expect("Failed to copy bindings.rs");
     } else {
-        let mut bindings = bindgen::Builder::default().header("wrapper.h");
+        // Get absolute path to wrapper.h
+        let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+        let wrapper_h = manifest_dir.join("wrapper.h");
+        let mut bindings = bindgen::Builder::default().header(wrapper_h.to_str().unwrap());
 
         // When use-shared-ggml is enabled, use ggml-rs headers
         if cfg!(feature = "use-shared-ggml") {
@@ -151,19 +154,19 @@ fn main() {
             // Use embedded ggml headers
             #[cfg(feature = "metal")]
             {
-                bindings = bindings.header("whisper.cpp/ggml/include/ggml-metal.h");
+                bindings = bindings.header(whisper_root.join("ggml/include/ggml-metal.h").to_str().unwrap());
             }
             #[cfg(feature = "vulkan")]
             {
                 bindings = bindings
-                    .header("whisper.cpp/ggml/include/ggml-vulkan.h")
+                    .header(whisper_root.join("ggml/include/ggml-vulkan.h").to_str().unwrap())
                     .clang_arg("-DGGML_USE_VULKAN=1");
             }
         }
 
         let mut bindings_builder = bindings
-            .clang_arg("-I./whisper.cpp/")
-            .clang_arg("-I./whisper.cpp/include");
+            .clang_arg(format!("-I{}", whisper_root.display()))
+            .clang_arg(format!("-I{}", whisper_root.join("include").display()));
         
         // Add GGML include path
         if cfg!(feature = "use-shared-ggml") {
@@ -171,7 +174,7 @@ fn main() {
                 bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
             }
         } else {
-            bindings_builder = bindings_builder.clang_arg("-I./whisper.cpp/ggml/include");
+            bindings_builder = bindings_builder.clang_arg(format!("-I{}", whisper_root.join("ggml/include").display()));
         }
 
         let bindings = bindings_builder
