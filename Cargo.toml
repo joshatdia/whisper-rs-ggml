@@ -39,6 +39,9 @@ _gpu = []
 test-with-tiny-model = []
 
 # Use shared GGML backend to avoid duplicate symbol conflicts
+# Note: When using use-shared-ggml with features (cuda, vulkan, etc.),
+# you must also enable those features on ggml-rs in your Cargo.toml:
+# ggml-rs = { ..., features = ["cuda"] }
 use-shared-ggml = ["whisper-rs-sys/use-shared-ggml"]
 
 # Bring logs into Rust via the log crate. *Warning*: not mutually exclusive with tracing_backend,

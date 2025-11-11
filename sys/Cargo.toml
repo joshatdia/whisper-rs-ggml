@@ -38,6 +38,8 @@ openmp = []
 intel-sycl = []
 # Use shared GGML backend to avoid duplicate symbol conflicts
 use-shared-ggml = ["dep:ggml-rs"]
+# Note: When use-shared-ggml is enabled, features must be enabled on ggml-rs directly
+# For example: ggml-rs = { ..., features = ["cuda"] } in the parent crate's Cargo.toml
 
 [dependencies]
 ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
