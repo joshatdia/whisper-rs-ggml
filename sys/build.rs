@@ -302,38 +302,12 @@ fn main() {
 
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
-        // Link to shared ggml libraries from ggml-rs
+        // Link to base shared ggml libraries from ggml-rs
+        // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, etc.) are handled
+        // by ggml-rs when it's built with those features. We don't need to link them here.
         println!("cargo:rustc-link-lib=dylib=ggml");
         println!("cargo:rustc-link-lib=dylib=ggml-base");
         println!("cargo:rustc-link-lib=dylib=ggml-cpu");
-        
-        if cfg!(target_os = "macos") || cfg!(feature = "openblas") {
-            println!("cargo:rustc-link-lib=dylib=ggml-blas");
-        }
-        
-        if cfg!(feature = "vulkan") {
-            println!("cargo:rustc-link-lib=dylib=ggml-vulkan");
-        }
-        
-        if cfg!(feature = "hipblas") {
-            println!("cargo:rustc-link-lib=dylib=ggml-hip");
-        }
-        
-        if cfg!(feature = "metal") {
-            println!("cargo:rustc-link-lib=dylib=ggml-metal");
-        }
-        
-        if cfg!(feature = "cuda") {
-            println!("cargo:rustc-link-lib=dylib=ggml-cuda");
-        }
-        
-        if cfg!(feature = "openblas") {
-            println!("cargo:rustc-link-lib=dylib=ggml-blas");
-        }
-        
-        if cfg!(feature = "intel-sycl") {
-            println!("cargo:rustc-link-lib=dylib=ggml-sycl");
-        }
         
         // Build only whisper (not ggml)
         let mut config = Config::new(&whisper_root);
