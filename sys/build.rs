@@ -7,6 +7,7 @@ use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
     let target = env::var("TARGET").unwrap();
@@ -102,27 +103,116 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
-    let ggml_lib_dir = env::var("DEP_GGML_RS_ROOT")
-        .map(|root| PathBuf::from(root).join("lib"))
-        .ok();
-    let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
+    // The ggml-rs package exports DEP_GGML_* variables (not DEP_GGML_RS_*)
+    let ggml_lib_dir = env::var("DEP_GGML_LIB_DIR")
+        .or_else(|_| env::var("DEP_GGML_ROOT").map(|root| format!("{}/lib", root)))
         .map(PathBuf::from)
         .ok();
-    let ggml_prefix = ggml_lib_dir.as_ref()
-        .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
+    let ggml_include_dir = env::var("DEP_GGML_INCLUDE")
+        .or_else(|_| env::var("DEP_GGML_ROOT").map(|root| format!("{}/include", root)))
+        .map(PathBuf::from)
+        .ok();
+    // ggml_prefix will be recalculated later when needed for CMake
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let whisper_root = out.join("whisper.cpp");
 
-    if !whisper_root.exists() {
+    // Get manifest directory (where build.rs is located)
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let whisper_cpp_source = manifest_dir.join("whisper.cpp");
+
+    // Helper function to check if directory has contents
+    let dir_has_contents = |path: &PathBuf| -> bool {
+        path.read_dir()
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false)
+    };
+    
+    // If whisper.cpp doesn't exist locally, download it
+    let whisper_exists = whisper_cpp_source.exists() && dir_has_contents(&whisper_cpp_source);
+    
+    if !whisper_exists {
+        println!("cargo:warning=whisper.cpp not found, downloading from GitHub...");
+        
+        // Try to initialize submodule first (if in a git repo)
+        let git_result = Command::new("git")
+            .args(&["submodule", "update", "--init", "--recursive", "whisper.cpp"])
+            .current_dir(&manifest_dir)
+            .output();
+        
+        // Check if submodule init worked
+        let submodule_success = git_result.is_ok() && 
+            git_result.as_ref().unwrap().status.success() &&
+            whisper_cpp_source.exists() &&
+            dir_has_contents(&whisper_cpp_source);
+        
+        // If submodule init failed or whisper.cpp still doesn't exist, clone directly
+        if !submodule_success {
+            println!("cargo:warning=Submodule init failed, cloning whisper.cpp directly...");
+            
+            // Clone whisper.cpp to a temp location
+            let temp_whisper = out.join("whisper.cpp-temp");
+            if temp_whisper.exists() {
+                std::fs::remove_dir_all(&temp_whisper).unwrap_or_default();
+            }
+            
+            let clone_result = Command::new("git")
+                .args(&["clone", "--depth", "1", "https://github.com/ggerganov/whisper.cpp.git", temp_whisper.to_str().unwrap()])
+                .output();
+            
+            match clone_result {
+                Ok(output) if output.status.success() => {
+                    // Move the cloned directory to the expected location
+                    if whisper_cpp_source.exists() {
+                        std::fs::remove_dir_all(&whisper_cpp_source).ok();
+                    }
+                    std::fs::create_dir_all(whisper_cpp_source.parent().unwrap()).unwrap();
+                    
+                    // Try rename first, fall back to copy if rename fails (cross-filesystem)
+                    if std::fs::rename(&temp_whisper, &whisper_cpp_source).is_err() {
+                        fs_extra::dir::copy(&temp_whisper, &manifest_dir, &Default::default()).unwrap_or_else(|e| {
+                            panic!("Failed to copy cloned whisper.cpp: {}", e);
+                        });
+                        std::fs::remove_dir_all(&temp_whisper).ok();
+                    }
+                    println!("cargo:warning=Successfully downloaded whisper.cpp");
+                }
+                Ok(output) => {
+                    eprintln!("Failed to clone whisper.cpp: {}", String::from_utf8_lossy(&output.stderr));
+                    panic!("Failed to download whisper.cpp. Please ensure git is installed and you have internet access.");
+                }
+                Err(e) => {
+                    panic!("Failed to run git clone: {}. Please ensure git is installed.", e);
+                }
+            }
+        } else {
+            println!("cargo:warning=Successfully initialized whisper.cpp submodule");
+        }
+    }
+
+    // Now copy whisper.cpp to the build directory
+    if !whisper_root.exists() || !whisper_root.join("CMakeLists.txt").exists() {
+        if whisper_root.exists() {
+            std::fs::remove_dir_all(&whisper_root).unwrap_or_default();
+        }
         std::fs::create_dir_all(&whisper_root).unwrap();
-        fs_extra::dir::copy("./whisper.cpp", &out, &Default::default()).unwrap_or_else(|e| {
+        fs_extra::dir::copy(&whisper_cpp_source, &out, &Default::default()).unwrap_or_else(|e| {
             panic!(
-                "Failed to copy whisper sources into {}: {}",
+                "Failed to copy whisper sources from {} to {}: {}",
+                whisper_cpp_source.display(),
                 whisper_root.display(),
                 e
             )
         });
+        
+        // Verify CMakeLists.txt exists after copy
+        if !whisper_root.join("CMakeLists.txt").exists() {
+            panic!(
+                "CMakeLists.txt not found in {} after copy. Source: {}",
+                whisper_root.display(),
+                whisper_cpp_source.display()
+            );
+        }
     }
 
     if env::var("WHISPER_DONT_GENERATE_BINDINGS").is_ok() {
@@ -154,28 +244,36 @@ fn main() {
             // Use embedded ggml headers
             #[cfg(feature = "metal")]
             {
-                bindings = bindings.header(whisper_root.join("ggml/include/ggml-metal.h").to_str().unwrap());
+                bindings = bindings.header(whisper_cpp_source.join("ggml/include/ggml-metal.h").to_str().unwrap());
             }
             #[cfg(feature = "vulkan")]
             {
                 bindings = bindings
-                    .header(whisper_root.join("ggml/include/ggml-vulkan.h").to_str().unwrap())
+                    .header(whisper_cpp_source.join("ggml/include/ggml-vulkan.h").to_str().unwrap())
                     .clang_arg("-DGGML_USE_VULKAN=1");
             }
         }
 
-        let mut bindings_builder = bindings
-            .clang_arg(format!("-I{}", whisper_root.display()))
-            .clang_arg(format!("-I{}", whisper_root.join("include").display()));
+        // Use whisper_cpp_source for include paths since that's where the files are
+        // (they get copied to whisper_root later for CMake)
+        // IMPORTANT: Add GGML include path FIRST so whisper.h can find ggml.h
+        let mut bindings_builder = bindings;
         
         // Add GGML include path
         if cfg!(feature = "use-shared-ggml") {
             if let Some(ref include_dir) = ggml_include_dir {
                 bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
+            } else {
+                panic!("use-shared-ggml feature is enabled but DEP_GGML_INCLUDE or DEP_GGML_ROOT is not set. Make sure ggml-rs is properly configured and built.");
             }
         } else {
-            bindings_builder = bindings_builder.clang_arg(format!("-I{}", whisper_root.join("ggml/include").display()));
+            bindings_builder = bindings_builder.clang_arg(format!("-I{}", whisper_cpp_source.join("ggml/include").display()));
         }
+        
+        // Now add whisper include paths
+        bindings_builder = bindings_builder
+            .clang_arg(format!("-I{}", whisper_cpp_source.display()))
+            .clang_arg(format!("-I{}", whisper_cpp_source.join("include").display()));
 
         let bindings = bindings_builder
             .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -252,6 +350,11 @@ fn main() {
             .pic(true);
         
         // CRITICAL: Tell CMake where to find ggml
+        // Use DEP_GGML_ROOT if available, otherwise construct from lib_dir
+        let ggml_prefix = ggml_lib_dir.as_ref()
+            .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()))
+            .or_else(|| env::var("DEP_GGML_ROOT").ok().map(PathBuf::from));
+        
         if let Some(ref prefix) = ggml_prefix {
             // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
             config.define("CMAKE_PREFIX_PATH", prefix.to_str().unwrap());
