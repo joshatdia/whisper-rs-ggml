@@ -106,13 +106,34 @@ fn main() {
     // Use new whisper-specific environment variables from ggml-rs
     // ggml-rs now exports: DEP_GGML_RS_GGML_WHISPER_LIB_DIR, DEP_GGML_RS_GGML_WHISPER_BIN_DIR, DEP_GGML_RS_GGML_WHISPER_BASENAME
     let ggml_lib_dir = env::var("DEP_GGML_RS_GGML_WHISPER_LIB_DIR")
-        .map(PathBuf::from)
+        .map(|v| {
+            println!("cargo:warning=[GGML] Found DEP_GGML_RS_GGML_WHISPER_LIB_DIR: {}", v);
+            PathBuf::from(v)
+        })
+        .or_else(|e| {
+            println!("cargo:warning=[GGML] DEP_GGML_RS_GGML_WHISPER_LIB_DIR not set: {:?}", e);
+            Err(e)
+        })
         .ok();
     let ggml_bin_dir = env::var("DEP_GGML_RS_GGML_WHISPER_BIN_DIR")
-        .map(PathBuf::from)
+        .map(|v| {
+            println!("cargo:warning=[GGML] Found DEP_GGML_RS_GGML_WHISPER_BIN_DIR: {}", v);
+            PathBuf::from(v)
+        })
+        .or_else(|e| {
+            println!("cargo:warning=[GGML] DEP_GGML_RS_GGML_WHISPER_BIN_DIR not set: {:?}", e);
+            Err(e)
+        })
         .ok();
     let ggml_lib_basename = env::var("DEP_GGML_RS_GGML_WHISPER_BASENAME")
-        .unwrap_or_else(|_| "ggml_whisper".to_string()); // Fallback to "ggml_whisper" if not set
+        .map(|v| {
+            println!("cargo:warning=[GGML] Found DEP_GGML_RS_GGML_WHISPER_BASENAME: {}", v);
+            v
+        })
+        .unwrap_or_else(|e| {
+            println!("cargo:warning=[GGML] DEP_GGML_RS_GGML_WHISPER_BASENAME not set: {:?}, using fallback", e);
+            "ggml_whisper".to_string()
+        });
     let ggml_include_dir = if let Ok(include) = env::var("DEP_GGML_RS_GGML_WHISPER_INCLUDE") {
         Some(PathBuf::from(include))
     } else if let Ok(include) = env::var("DEP_GGML_RS_INCLUDE") {
@@ -321,6 +342,19 @@ fn main() {
         // When CUDA is enabled on ggml-rs, it builds ggml_whisper-cuda and places it in LIB_DIR
         // ggml-rs builds these libraries but doesn't link them for dependent crates
         // We link them here based on what's available in the LIB_DIR
+        
+        // Verify that ggml-rs build script ran and exported the required variables
+        if ggml_lib_dir.is_none() {
+            panic!(
+                "use-shared-ggml feature is enabled but DEP_GGML_RS_GGML_WHISPER_LIB_DIR is not set.\n\
+                This means ggml-rs's build script did not run or did not export the required variables.\n\
+                Please verify:\n\
+                1. ggml-rs is in [build-dependencies] of this crate's Cargo.toml\n\
+                2. ggml-rs's build.rs exports: DEP_GGML_RS_GGML_WHISPER_LIB_DIR, DEP_GGML_RS_GGML_WHISPER_BIN_DIR, DEP_GGML_RS_GGML_WHISPER_BASENAME\n\
+                3. The variable names match exactly (case-sensitive)"
+            );
+        }
+        
         let lib_base_name = &ggml_lib_basename;
         
         println!("cargo:warning=[GGML] Using whisper-specific GGML libraries with basename: {}", lib_base_name);
