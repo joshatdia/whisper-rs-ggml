@@ -359,6 +359,57 @@ fn main() {
             config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
         }
         
+        // CRITICAL: Tell CMake to use the namespaced library name
+        // When namespace-whisper is enabled, libraries are named ggml_whisper, not ggml
+        // The ggml-config.cmake file looks for "ggml" but we need it to find "ggml_whisper"
+        // We'll patch the CMake config file after ggml-rs generates it, or set variables
+        // that override the library name in find_library calls
+        if let Some(ref lib_dir) = ggml_lib_dir {
+            let lib_base_name = "ggml_whisper";
+            let ggml_cmake_dir = ggml_prefix.as_ref()
+                .map(|p| p.join("lib").join("cmake").join("ggml"))
+                .or_else(|| lib_dir.parent().map(|p| p.join("lib").join("cmake").join("ggml")));
+            
+            // Try to patch ggml-config.cmake to use the namespaced library name
+            if let Some(ref cmake_dir) = ggml_cmake_dir {
+                let config_file = cmake_dir.join("ggml-config.cmake");
+                if config_file.exists() {
+                    // Read the config file
+                    if let Ok(mut contents) = std::fs::read_to_string(&config_file) {
+                        // Replace find_library calls that look for "ggml" with "ggml_whisper"
+                        // This is a workaround for the fact that ggml-config.cmake hardcodes "ggml"
+                        contents = contents.replace("find_library(GGML_LIBRARY NAMES ggml", 
+                            &format!("find_library(GGML_LIBRARY NAMES {} ggml", lib_base_name));
+                        contents = contents.replace("NAMES ggml", 
+                            &format!("NAMES {} ggml", lib_base_name));
+                        
+                        // Write the patched config back
+                        if let Err(e) = std::fs::write(&config_file, contents) {
+                            println!("cargo:warning=[GGML] Failed to patch ggml-config.cmake: {}", e);
+                        } else {
+                            println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced library: {}", lib_base_name);
+                        }
+                    }
+                }
+            }
+            
+            // Also set GGML_LIBRARY directly as a fallback
+            let lib_file = if cfg!(target_os = "windows") {
+                format!("{}.lib", lib_base_name)
+            } else {
+                format!("lib{}.a", lib_base_name)
+            };
+            let namespaced_lib = lib_dir.join(&lib_file);
+            
+            if namespaced_lib.exists() {
+                config.define("GGML_LIBRARY", namespaced_lib.to_str().unwrap());
+                println!("cargo:warning=[GGML] Setting GGML_LIBRARY to namespaced library: {}", namespaced_lib.display());
+            } else {
+                config.define("GGML_LIB_DIR", lib_dir.to_str().unwrap());
+                println!("cargo:warning=[GGML] Namespaced library not found at {}, using GGML_LIB_DIR", namespaced_lib.display());
+            }
+        }
+        
         if cfg!(target_os = "windows") {
             config.cxxflag("/utf-8");
             println!("cargo:rustc-link-lib=advapi32");
