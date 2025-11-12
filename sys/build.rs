@@ -418,69 +418,79 @@ fn main() {
                 if config_file.exists() {
                     // Read the config file
                     if let Ok(mut contents) = std::fs::read_to_string(&config_file) {
-                        // CRITICAL: First, replace any ggml_llama* references with ggml_whisper*
-                        // This handles the case where ggml-rs may have already patched the file with llama names
-                        // We need to replace ALL llama references with whisper references
-                        // Replace component libraries first (ggml_llama-base, ggml_llama-cpu, etc.)
-                        let llama_components = vec![
-                            "ggml_llama-base", "ggml_llama-cpu", "ggml_llama-cuda",
-                            "ggml_llama-vulkan", "ggml_llama-metal", "ggml_llama-hip",
-                            "ggml_llama-blas", "ggml_llama-sycl",
-                        ];
-                        for llama_component in &llama_components {
-                            let whisper_component = llama_component.replace("ggml_llama", lib_base_name);
-                            contents = contents.replace(llama_component, &whisper_component);
-                        }
-                        // Replace main library name and variable names
-                        contents = contents.replace("ggml_llama", lib_base_name);
-                        contents = contents.replace("GGML_LLAMA", "GGML_WHISPER");
+                        // Check if file is already correctly patched for whisper
+                        // If it already contains the whisper namespace, skip patching to avoid duplicates
+                        // ggml-rs should handle the patching when it builds the variants
+                        let already_patched = contents.contains(&format!("NAMES {}", lib_base_name)) 
+                            || contents.contains(&format!("ggml::{}", lib_base_name));
                         
-                        // List of all component library names that need to be namespaced
-                        // These are the generic names (ggml-base, ggml-cpu, etc.) that may still exist
-                        let component_libs = vec![
-                            "ggml-base",
-                            "ggml-cpu",
-                            "ggml-cuda",
-                            "ggml-vulkan",
-                            "ggml-metal",
-                            "ggml-hip",
-                            "ggml-blas",
-                            "ggml-sycl",
-                        ];
-                        
-                        // Replace all component library names FIRST (before main library)
-                        // This ensures we don't accidentally replace "ggml" inside "ggml-base"
-                        // All replacements use lib_base_name which is "ggml_whisper" (whisper-specific)
-                        for component in &component_libs {
-                            let namespaced = format!("{}-{}", lib_base_name, &component[5..]); // "ggml_whisper-base" from "ggml-base"
-                            // Replace all occurrences of the component library name
-                            // This handles: find_library(GGML_BASE_LIBRARY ggml-base, NAMES ggml-base, etc.
-                            contents = contents.replace(component, &namespaced);
-                        }
-                        
-                        // Now replace the main library name in find_library calls
-                        // Replace "ggml" with "ggml_whisper" (whisper-specific namespace) in NAMES clauses
-                        // But only if it's not already replaced (avoid double replacement)
-                        if !contents.contains(&format!("NAMES {}", lib_base_name)) {
-                            contents = contents.replace("find_library(GGML_LIBRARY NAMES ggml", 
-                                &format!("find_library(GGML_LIBRARY NAMES {} ggml", lib_base_name));
-                            contents = contents.replace("find_library(GGML_LIBRARY ggml", 
-                                &format!("find_library(GGML_LIBRARY {} ggml", lib_base_name));
-                            contents = contents.replace("NAMES ggml\"", 
-                                &format!("NAMES {} ggml\"", lib_base_name));
-                            contents = contents.replace("NAMES ggml ", 
-                                &format!("NAMES {} ggml ", lib_base_name));
-                            // Also handle cases where ggml appears alone (not in NAMES)
-                            // All replacements use "ggml_whisper" (whisper-specific)
-                            contents = contents.replace(" ggml\"", &format!(" {} ggml\"", lib_base_name));
-                            contents = contents.replace(" ggml ", &format!(" {} ggml ", lib_base_name));
-                        }
-                        
-                        // Write the patched config back
-                        if let Err(e) = std::fs::write(&config_file, contents) {
-                            println!("cargo:warning=[GGML] Failed to patch ggml-config.cmake: {}", e);
+                        if already_patched {
+                            println!("cargo:warning=[GGML] ggml-config.cmake already patched correctly by ggml-rs, skipping");
                         } else {
-                            println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced libraries: {}", lib_base_name);
+                            // CRITICAL: First, replace any ggml_llama* references with ggml_whisper*
+                            // This handles the case where ggml-rs may have already patched the file with llama names
+                            // We need to replace ALL llama references with whisper references
+                            // Replace component libraries first (ggml_llama-base, ggml_llama-cpu, etc.)
+                            let llama_components = vec![
+                                "ggml_llama-base", "ggml_llama-cpu", "ggml_llama-cuda",
+                                "ggml_llama-vulkan", "ggml_llama-metal", "ggml_llama-hip",
+                                "ggml_llama-blas", "ggml_llama-sycl",
+                            ];
+                            for llama_component in &llama_components {
+                                let whisper_component = llama_component.replace("ggml_llama", lib_base_name);
+                                contents = contents.replace(llama_component, &whisper_component);
+                            }
+                            // Replace main library name and variable names
+                            contents = contents.replace("ggml_llama", lib_base_name);
+                            contents = contents.replace("GGML_LLAMA", "GGML_WHISPER");
+                            
+                            // List of all component library names that need to be namespaced
+                            // These are the generic names (ggml-base, ggml-cpu, etc.) that may still exist
+                            let component_libs = vec![
+                                "ggml-base",
+                                "ggml-cpu",
+                                "ggml-cuda",
+                                "ggml-vulkan",
+                                "ggml-metal",
+                                "ggml-hip",
+                                "ggml-blas",
+                                "ggml-sycl",
+                            ];
+                            
+                            // Replace all component library names FIRST (before main library)
+                            // This ensures we don't accidentally replace "ggml" inside "ggml-base"
+                            // All replacements use lib_base_name which is "ggml_whisper" (whisper-specific)
+                            for component in &component_libs {
+                                let namespaced = format!("{}-{}", lib_base_name, &component[5..]); // "ggml_whisper-base" from "ggml-base"
+                                // Replace all occurrences of the component library name
+                                // This handles: find_library(GGML_BASE_LIBRARY ggml-base, NAMES ggml-base, etc.
+                                contents = contents.replace(component, &namespaced);
+                            }
+                            
+                            // Now replace the main library name in find_library calls
+                            // Replace "ggml" with "ggml_whisper" (whisper-specific namespace) in NAMES clauses
+                            // But only if it's not already replaced (avoid double replacement)
+                            if !contents.contains(&format!("NAMES {}", lib_base_name)) {
+                                contents = contents.replace("find_library(GGML_LIBRARY NAMES ggml", 
+                                    &format!("find_library(GGML_LIBRARY NAMES {} ggml", lib_base_name));
+                                contents = contents.replace("find_library(GGML_LIBRARY ggml", 
+                                    &format!("find_library(GGML_LIBRARY {} ggml", lib_base_name));
+                                contents = contents.replace("NAMES ggml\"", 
+                                    &format!("NAMES {} ggml\"", lib_base_name));
+                                contents = contents.replace("NAMES ggml ", 
+                                    &format!("NAMES {} ggml ", lib_base_name));
+                                // Also handle cases where ggml appears alone (not in NAMES)
+                                // All replacements use "ggml_whisper" (whisper-specific)
+                                contents = contents.replace(" ggml\"", &format!(" {} ggml\"", lib_base_name));
+                                contents = contents.replace(" ggml ", &format!(" {} ggml ", lib_base_name));
+                            }
+                            
+                            // Write the patched config back
+                            if let Err(e) = std::fs::write(&config_file, contents) {
+                                println!("cargo:warning=[GGML] Failed to patch ggml-config.cmake: {}", e);
+                            } else {
+                                println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced libraries: {}", lib_base_name);
+                            }
                         }
                     }
                 }
