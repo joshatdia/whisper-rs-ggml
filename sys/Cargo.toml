@@ -50,6 +50,10 @@ use-shared-ggml = ["dep:ggml-rs"]
 ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 
 [build-dependencies]
+# ggml-rs must be in [build-dependencies] so build.rs can access DEP_GGML_RS_* environment variables
+# The build script needs these variables to find the whisper-specific GGML libraries
+# When use-shared-ggml feature is enabled, this dependency is automatically enabled via "dep:ggml-rs"
+ggml-rs = { git = "https://github.com/joshatdia/ggml-rs.git", branch = "main", optional = true }
 cmake = "0.1"
 bindgen = "0.71"
 cfg-if = "1"
