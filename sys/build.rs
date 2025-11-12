@@ -103,12 +103,16 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
-    // The ggml-rs package exports DEP_GGML_* variables (not DEP_GGML_RS_*)
-    let ggml_lib_dir = env::var("DEP_GGML_LIB_DIR")
+    // Check for both DEP_GGML_RS_* and DEP_GGML_* variable names
+    let ggml_lib_dir = env::var("DEP_GGML_RS_LIB_DIR")
+        .or_else(|_| env::var("DEP_GGML_LIB_DIR"))
+        .or_else(|_| env::var("DEP_GGML_RS_ROOT").map(|root| format!("{}/lib", root)))
         .or_else(|_| env::var("DEP_GGML_ROOT").map(|root| format!("{}/lib", root)))
         .map(PathBuf::from)
         .ok();
-    let ggml_include_dir = env::var("DEP_GGML_INCLUDE")
+    let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
+        .or_else(|_| env::var("DEP_GGML_INCLUDE"))
+        .or_else(|_| env::var("DEP_GGML_RS_ROOT").map(|root| format!("{}/include", root)))
         .or_else(|_| env::var("DEP_GGML_ROOT").map(|root| format!("{}/include", root)))
         .map(PathBuf::from)
         .ok();
@@ -264,7 +268,7 @@ fn main() {
             if let Some(ref include_dir) = ggml_include_dir {
                 bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
             } else {
-                panic!("use-shared-ggml feature is enabled but DEP_GGML_INCLUDE or DEP_GGML_ROOT is not set. Make sure ggml-rs is properly configured and built.");
+                panic!("use-shared-ggml feature is enabled but DEP_GGML_RS_INCLUDE or DEP_GGML_RS_ROOT is not set. Make sure ggml-rs is properly configured and built with the namespace-whisper feature.");
             }
         } else {
             bindings_builder = bindings_builder.clang_arg(format!("-I{}", whisper_cpp_source.join("ggml/include").display()));
@@ -302,20 +306,19 @@ fn main() {
 
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
+        // IMPORTANT: Do NOT link to GGML libraries directly - ggml-rs handles all linking automatically
         // When namespace-whisper is enabled (which it is by default with use-shared-ggml),
         // libraries are named ggml_whisper, ggml_whisper-base, ggml_whisper-cpu, etc.
-        // Use namespaced library names (ggml_whisper, ggml_whisper-base, etc.)
+        // ggml-rs automatically links to the correct namespaced libraries
         let lib_base_name = "ggml_whisper";
         
         println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", lib_base_name);
-        println!("cargo:warning=[GGML] Linking to GGML libraries with base name: {}", lib_base_name);
+        println!("cargo:warning=[GGML] ggml-rs handles all library linking automatically");
         
-        // Link to base shared ggml libraries from ggml-rs
-        // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, etc.) are handled
-        // by ggml-rs when it's built with those features. We don't need to link them here.
-        println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
-        println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
-        println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
+        // Add library search path (ggml-rs already links the libraries)
+        if let Some(ref lib_dir) = ggml_lib_dir {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        }
         
         // Build only whisper (not ggml)
         let mut config = Config::new(&whisper_root);
@@ -332,10 +335,12 @@ fn main() {
             .pic(true);
         
         // CRITICAL: Tell CMake where to find ggml
-        // Use DEP_GGML_ROOT if available, otherwise construct from lib_dir
-        let ggml_prefix = ggml_lib_dir.as_ref()
-            .and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()))
-            .or_else(|| env::var("DEP_GGML_ROOT").ok().map(PathBuf::from));
+        // Use DEP_GGML_RS_ROOT or DEP_GGML_ROOT if available, otherwise construct from lib_dir
+        let ggml_prefix = env::var("DEP_GGML_RS_ROOT")
+            .or_else(|_| env::var("DEP_GGML_ROOT"))
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| ggml_lib_dir.as_ref().and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf())));
         
         if let Some(ref prefix) = ggml_prefix {
             // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
@@ -349,9 +354,6 @@ fn main() {
         
         // Alternative: If CMake config files aren't in the expected location,
         // you may need to set additional paths
-        if let Some(ref lib_dir) = ggml_lib_dir {
-            println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        }
         if let Some(ref include_dir) = ggml_include_dir {
             // Add include directory for CMake
             config.define("GGML_INCLUDE_DIR", include_dir.to_str().unwrap());
