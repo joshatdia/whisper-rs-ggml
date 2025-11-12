@@ -303,11 +303,27 @@ fn main() {
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
         // Link to base shared ggml libraries from ggml-rs
+        // When namespace-whisper is enabled (which it is by default with use-shared-ggml),
+        // libraries are named ggml_whisper, ggml_whisper-base, ggml_whisper-cpu, etc.
         // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, etc.) are handled
         // by ggml-rs when it's built with those features. We don't need to link them here.
-        println!("cargo:rustc-link-lib=dylib=ggml");
-        println!("cargo:rustc-link-lib=dylib=ggml-base");
-        println!("cargo:rustc-link-lib=dylib=ggml-cpu");
+        // Check if we're using namespaced libraries by checking if ggml-rs exported a namespace variable
+        let use_namespace = env::var("DEP_GGML_RS_NAMESPACE").is_ok() || 
+                           env::var("DEP_GGML_NAMESPACE").is_ok() ||
+                           // namespace-whisper is automatically enabled with use-shared-ggml
+                           true; // Assume namespace-whisper is enabled since it's in the feature
+        
+        if use_namespace {
+            // Use namespaced library names (ggml_whisper, ggml_whisper-base, etc.)
+            println!("cargo:rustc-link-lib=dylib=ggml_whisper");
+            println!("cargo:rustc-link-lib=dylib=ggml_whisper-base");
+            println!("cargo:rustc-link-lib=dylib=ggml_whisper-cpu");
+        } else {
+            // Use generic library names (for backward compatibility)
+            println!("cargo:rustc-link-lib=dylib=ggml");
+            println!("cargo:rustc-link-lib=dylib=ggml-base");
+            println!("cargo:rustc-link-lib=dylib=ggml-cpu");
+        }
         
         // Build only whisper (not ggml)
         let mut config = Config::new(&whisper_root);
