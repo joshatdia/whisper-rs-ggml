@@ -302,28 +302,20 @@ fn main() {
 
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
-        // Link to base shared ggml libraries from ggml-rs
         // When namespace-whisper is enabled (which it is by default with use-shared-ggml),
         // libraries are named ggml_whisper, ggml_whisper-base, ggml_whisper-cpu, etc.
+        // Use namespaced library names (ggml_whisper, ggml_whisper-base, etc.)
+        let lib_base_name = "ggml_whisper";
+        
+        println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", lib_base_name);
+        println!("cargo:warning=[GGML] Linking to GGML libraries with base name: {}", lib_base_name);
+        
+        // Link to base shared ggml libraries from ggml-rs
         // Note: Feature-specific libraries (ggml-cuda, ggml-vulkan, etc.) are handled
         // by ggml-rs when it's built with those features. We don't need to link them here.
-        // Check if we're using namespaced libraries by checking if ggml-rs exported a namespace variable
-        let use_namespace = env::var("DEP_GGML_RS_NAMESPACE").is_ok() || 
-                           env::var("DEP_GGML_NAMESPACE").is_ok() ||
-                           // namespace-whisper is automatically enabled with use-shared-ggml
-                           true; // Assume namespace-whisper is enabled since it's in the feature
-        
-        if use_namespace {
-            // Use namespaced library names (ggml_whisper, ggml_whisper-base, etc.)
-            println!("cargo:rustc-link-lib=dylib=ggml_whisper");
-            println!("cargo:rustc-link-lib=dylib=ggml_whisper-base");
-            println!("cargo:rustc-link-lib=dylib=ggml_whisper-cpu");
-        } else {
-            // Use generic library names (for backward compatibility)
-            println!("cargo:rustc-link-lib=dylib=ggml");
-            println!("cargo:rustc-link-lib=dylib=ggml-base");
-            println!("cargo:rustc-link-lib=dylib=ggml-cpu");
-        }
+        println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
+        println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
+        println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
         
         // Build only whisper (not ggml)
         let mut config = Config::new(&whisper_root);
@@ -405,6 +397,14 @@ fn main() {
         add_link_search_path(&out.join("build")).unwrap();
         println!("cargo:rustc-link-search=native={}", destination.display());
         println!("cargo:rustc-link-lib=static=whisper");
+        
+        // On Windows, copy namespace-specific GGML DLLs to the target directory for runtime
+        if cfg!(target_os = "windows") && cfg!(feature = "use-shared-ggml") {
+            if let Some(ref lib_dir) = ggml_lib_dir {
+                let lib_base_name = "ggml_whisper";
+                copy_namespace_dlls_to_target(lib_dir, lib_base_name);
+            }
+        }
         
     } else {
         // Original code: build whisper with embedded ggml
@@ -622,4 +622,52 @@ fn get_whisper_cpp_version(whisper_root: &std::path::Path) -> std::io::Result<Op
     }
 
     Ok(None)
+}
+
+/// Copy namespace-specific GGML DLLs to the target directory for runtime on Windows
+fn copy_namespace_dlls_to_target(lib_dir: &PathBuf, lib_base_name: &str) {
+    let target_dir = env::var("OUT_DIR")
+        .ok()
+        .and_then(|out| {
+            PathBuf::from(&out)
+                .ancestors()
+                .nth(3) // Go up from build/.../out to target/debug or target/release
+                .map(|p| p.to_path_buf())
+        });
+    
+    if let Some(target) = target_dir {
+        // List of namespace-specific libraries to copy
+        let libraries = vec![
+            lib_base_name.to_string(),
+            format!("{}-base", lib_base_name),
+            format!("{}-cpu", lib_base_name),
+            format!("{}-cuda", lib_base_name),
+            format!("{}-vulkan", lib_base_name),
+            format!("{}-metal", lib_base_name),
+            format!("{}-hip", lib_base_name),
+            format!("{}-blas", lib_base_name),
+            format!("{}-sycl", lib_base_name),
+        ];
+        
+        let mut copied_count = 0;
+        
+        for lib_name in &libraries {
+            let dll_name = format!("{}.dll", lib_name);
+            let src = lib_dir.join(&dll_name);
+            if src.exists() {
+                let dst = target.join(&dll_name);
+                if let Err(e) = std::fs::copy(&src, &dst) {
+                    println!("cargo:warning=[GGML] Failed to copy {} to {}: {}", 
+                        src.display(), dst.display(), e);
+                } else {
+                    println!("cargo:warning=[GGML] Copying namespace-specific library: {}", dll_name);
+                    copied_count += 1;
+                }
+            }
+        }
+        
+        if copied_count > 0 {
+            println!("cargo:warning=[GGML] Copied {} namespace-specific GGML libraries", copied_count);
+        }
+    }
 }
