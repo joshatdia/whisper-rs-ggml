@@ -306,14 +306,13 @@ fn main() {
 
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
-        // IMPORTANT: Do NOT link to GGML libraries directly - ggml-rs handles all linking automatically
+        // IMPORTANT: We need to link to the namespaced GGML libraries explicitly
         // When namespace-whisper is enabled (which it is by default with use-shared-ggml),
         // libraries are named ggml_whisper, ggml_whisper-base, ggml_whisper-cpu, etc.
-        // ggml-rs automatically links to the correct namespaced libraries
+        // ggml-rs builds these libraries but doesn't link them for dependent crates
         let lib_base_name = "ggml_whisper";
         
         println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", lib_base_name);
-        println!("cargo:warning=[GGML] ggml-rs handles all library linking automatically");
         
         // Add library search path (ggml-rs already links the libraries)
         if let Some(ref lib_dir) = ggml_lib_dir {
@@ -481,10 +480,95 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", destination.display());
         println!("cargo:rustc-link-lib=static=whisper");
         
+        // CRITICAL: Link to the namespaced GGML libraries
+        // ggml-rs builds the libraries but doesn't link them for dependent crates
+        if let Some(ref lib_dir) = ggml_lib_dir {
+            // Always link the base libraries
+            println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
+            println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
+            println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
+            
+            // Link feature-specific libraries if they exist
+            // Check for CUDA
+            let cuda_lib = if cfg!(target_os = "windows") {
+                lib_dir.join(format!("{}-cuda.lib", lib_base_name))
+            } else if cfg!(target_os = "macos") {
+                lib_dir.join(format!("lib{}-cuda.dylib", lib_base_name))
+            } else {
+                lib_dir.join(format!("lib{}-cuda.so", lib_base_name))
+            };
+            if cuda_lib.exists() || lib_dir.join(format!("{}-cuda.dll", lib_base_name)).exists() {
+                println!("cargo:rustc-link-lib=dylib={}-cuda", lib_base_name);
+            }
+            
+            // Check for Vulkan
+            let vulkan_lib = if cfg!(target_os = "windows") {
+                lib_dir.join(format!("{}-vulkan.lib", lib_base_name))
+            } else if cfg!(target_os = "macos") {
+                lib_dir.join(format!("lib{}-vulkan.dylib", lib_base_name))
+            } else {
+                lib_dir.join(format!("lib{}-vulkan.so", lib_base_name))
+            };
+            if vulkan_lib.exists() || lib_dir.join(format!("{}-vulkan.dll", lib_base_name)).exists() {
+                println!("cargo:rustc-link-lib=dylib={}-vulkan", lib_base_name);
+            }
+            
+            // Check for Metal (macOS)
+            if cfg!(target_os = "macos") {
+                let metal_lib = lib_dir.join(format!("lib{}-metal.dylib", lib_base_name));
+                let metal_static = lib_dir.join(format!("lib{}-metal.a", lib_base_name));
+                if metal_lib.exists() || metal_static.exists() {
+                    println!("cargo:rustc-link-lib=dylib={}-metal", lib_base_name);
+                }
+            }
+            
+            // Check for BLAS
+            if cfg!(target_os = "macos") || cfg!(feature = "openblas") {
+                let blas_lib = if cfg!(target_os = "windows") {
+                    lib_dir.join(format!("{}-blas.lib", lib_base_name))
+                } else if cfg!(target_os = "macos") {
+                    lib_dir.join(format!("lib{}-blas.dylib", lib_base_name))
+                } else {
+                    lib_dir.join(format!("lib{}-blas.so", lib_base_name))
+                };
+                if blas_lib.exists() || lib_dir.join(format!("{}-blas.dll", lib_base_name)).exists() ||
+                   lib_dir.join(format!("lib{}-blas.a", lib_base_name)).exists() {
+                    println!("cargo:rustc-link-lib=dylib={}-blas", lib_base_name);
+                }
+            }
+            
+            // Check for HIP
+            if cfg!(feature = "hipblas") {
+                let hip_lib = if cfg!(target_os = "windows") {
+                    lib_dir.join(format!("{}-hip.lib", lib_base_name))
+                } else if cfg!(target_os = "macos") {
+                    lib_dir.join(format!("lib{}-hip.dylib", lib_base_name))
+                } else {
+                    lib_dir.join(format!("lib{}-hip.so", lib_base_name))
+                };
+                if hip_lib.exists() || lib_dir.join(format!("{}-hip.dll", lib_base_name)).exists() {
+                    println!("cargo:rustc-link-lib=dylib={}-hip", lib_base_name);
+                }
+            }
+            
+            // Check for SYCL
+            if cfg!(feature = "intel-sycl") {
+                let sycl_lib = if cfg!(target_os = "windows") {
+                    lib_dir.join(format!("{}-sycl.lib", lib_base_name))
+                } else if cfg!(target_os = "macos") {
+                    lib_dir.join(format!("lib{}-sycl.dylib", lib_base_name))
+                } else {
+                    lib_dir.join(format!("lib{}-sycl.so", lib_base_name))
+                };
+                if sycl_lib.exists() || lib_dir.join(format!("{}-sycl.dll", lib_base_name)).exists() {
+                    println!("cargo:rustc-link-lib=dylib={}-sycl", lib_base_name);
+                }
+            }
+        }
+        
         // On Windows, copy namespace-specific GGML DLLs to the target directory for runtime
         if cfg!(target_os = "windows") && cfg!(feature = "use-shared-ggml") {
             if let Some(ref lib_dir) = ggml_lib_dir {
-                let lib_base_name = "ggml_whisper";
                 copy_namespace_dlls_to_target(lib_dir, lib_base_name);
             }
         }
