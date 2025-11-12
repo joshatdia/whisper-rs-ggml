@@ -363,8 +363,8 @@ fn main() {
         // The ggml-config.cmake file looks for "ggml" but we need it to find "ggml_whisper"
         // We'll patch the CMake config file after ggml-rs generates it, or set variables
         // that override the library name in find_library calls
+        // NOTE: lib_base_name is already defined above as "ggml_whisper" (whisper-specific)
         if let Some(ref lib_dir) = ggml_lib_dir {
-            let lib_base_name = "ggml_whisper";
             let ggml_cmake_dir = ggml_prefix.as_ref()
                 .map(|p| p.join("lib").join("cmake").join("ggml"))
                 .or_else(|| lib_dir.parent().map(|p| p.join("lib").join("cmake").join("ggml")));
@@ -391,6 +391,7 @@ fn main() {
                         
                         // Replace all component library names FIRST (before main library)
                         // This ensures we don't accidentally replace "ggml" inside "ggml-base"
+                        // All replacements use lib_base_name which is "ggml_whisper" (whisper-specific)
                         for component in &component_libs {
                             let namespaced = format!("{}-{}", lib_base_name, &component[5..]); // "ggml_whisper-base" from "ggml-base"
                             // Replace all occurrences of the component library name
@@ -399,7 +400,7 @@ fn main() {
                         }
                         
                         // Now replace the main library name in find_library calls
-                        // Replace "ggml" with "ggml_whisper" in NAMES clauses
+                        // Replace "ggml" with "ggml_whisper" (whisper-specific namespace) in NAMES clauses
                         contents = contents.replace("find_library(GGML_LIBRARY NAMES ggml", 
                             &format!("find_library(GGML_LIBRARY NAMES {} ggml", lib_base_name));
                         contents = contents.replace("find_library(GGML_LIBRARY ggml", 
@@ -409,6 +410,7 @@ fn main() {
                         contents = contents.replace("NAMES ggml ", 
                             &format!("NAMES {} ggml ", lib_base_name));
                         // Also handle cases where ggml appears alone (not in NAMES)
+                        // All replacements use "ggml_whisper" (whisper-specific)
                         contents = contents.replace(" ggml\"", &format!(" {} ggml\"", lib_base_name));
                         contents = contents.replace(" ggml ", &format!(" {} ggml ", lib_base_name));
                         
@@ -480,16 +482,20 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", destination.display());
         println!("cargo:rustc-link-lib=static=whisper");
         
-        // CRITICAL: Link to the namespaced GGML libraries
+        // CRITICAL: Link to the namespaced GGML libraries (whisper-specific: ggml_whisper)
         // ggml-rs builds the libraries but doesn't link them for dependent crates
+        // All library names use lib_base_name which is "ggml_whisper" (whisper-specific)
         if let Some(ref lib_dir) = ggml_lib_dir {
-            // Always link the base libraries
+            // Ensure the library search path is set right before linking (whisper-specific libraries)
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            
+            // Always link the base libraries (whisper-specific: ggml_whisper, ggml_whisper-base, ggml_whisper-cpu)
             println!("cargo:rustc-link-lib=dylib={}", lib_base_name);
             println!("cargo:rustc-link-lib=dylib={}-base", lib_base_name);
             println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
             
-            // Link feature-specific libraries if they exist
-            // Check for CUDA
+            // Link feature-specific libraries if they exist (all whisper-specific: ggml_whisper-*)
+            // Check for CUDA (whisper-specific: ggml_whisper-cuda)
             let cuda_lib = if cfg!(target_os = "windows") {
                 lib_dir.join(format!("{}-cuda.lib", lib_base_name))
             } else if cfg!(target_os = "macos") {
@@ -501,7 +507,7 @@ fn main() {
                 println!("cargo:rustc-link-lib=dylib={}-cuda", lib_base_name);
             }
             
-            // Check for Vulkan
+            // Check for Vulkan (whisper-specific: ggml_whisper-vulkan)
             let vulkan_lib = if cfg!(target_os = "windows") {
                 lib_dir.join(format!("{}-vulkan.lib", lib_base_name))
             } else if cfg!(target_os = "macos") {
@@ -513,7 +519,7 @@ fn main() {
                 println!("cargo:rustc-link-lib=dylib={}-vulkan", lib_base_name);
             }
             
-            // Check for Metal (macOS)
+            // Check for Metal (macOS) (whisper-specific: ggml_whisper-metal)
             if cfg!(target_os = "macos") {
                 let metal_lib = lib_dir.join(format!("lib{}-metal.dylib", lib_base_name));
                 let metal_static = lib_dir.join(format!("lib{}-metal.a", lib_base_name));
@@ -522,7 +528,7 @@ fn main() {
                 }
             }
             
-            // Check for BLAS
+            // Check for BLAS (whisper-specific: ggml_whisper-blas)
             if cfg!(target_os = "macos") || cfg!(feature = "openblas") {
                 let blas_lib = if cfg!(target_os = "windows") {
                     lib_dir.join(format!("{}-blas.lib", lib_base_name))
@@ -537,7 +543,7 @@ fn main() {
                 }
             }
             
-            // Check for HIP
+            // Check for HIP (whisper-specific: ggml_whisper-hip)
             if cfg!(feature = "hipblas") {
                 let hip_lib = if cfg!(target_os = "windows") {
                     lib_dir.join(format!("{}-hip.lib", lib_base_name))
@@ -551,7 +557,7 @@ fn main() {
                 }
             }
             
-            // Check for SYCL
+            // Check for SYCL (whisper-specific: ggml_whisper-sycl)
             if cfg!(feature = "intel-sycl") {
                 let sycl_lib = if cfg!(target_os = "windows") {
                     lib_dir.join(format!("{}-sycl.lib", lib_base_name))
@@ -567,6 +573,7 @@ fn main() {
         }
         
         // On Windows, copy namespace-specific GGML DLLs to the target directory for runtime
+        // All DLLs are whisper-specific: ggml_whisper.dll, ggml_whisper-base.dll, etc.
         if cfg!(target_os = "windows") && cfg!(feature = "use-shared-ggml") {
             if let Some(ref lib_dir) = ggml_lib_dir {
                 copy_namespace_dlls_to_target(lib_dir, lib_base_name);
@@ -792,6 +799,8 @@ fn get_whisper_cpp_version(whisper_root: &std::path::Path) -> std::io::Result<Op
 }
 
 /// Copy namespace-specific GGML DLLs to the target directory for runtime on Windows
+/// For whisper-rs, lib_base_name should be "ggml_whisper" (whisper-specific)
+/// This copies DLLs like: ggml_whisper.dll, ggml_whisper-base.dll, ggml_whisper-cpu.dll, etc.
 fn copy_namespace_dlls_to_target(lib_dir: &PathBuf, lib_base_name: &str) {
     let target_dir = env::var("OUT_DIR")
         .ok()
