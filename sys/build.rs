@@ -103,19 +103,27 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
 
     // Get ggml-rs paths if available (when use-shared-ggml is enabled)
-    // Check for both DEP_GGML_RS_* and DEP_GGML_* variable names
-    let ggml_lib_dir = env::var("DEP_GGML_RS_LIB_DIR")
-        .or_else(|_| env::var("DEP_GGML_LIB_DIR"))
-        .or_else(|_| env::var("DEP_GGML_RS_ROOT").map(|root| format!("{}/lib", root)))
-        .or_else(|_| env::var("DEP_GGML_ROOT").map(|root| format!("{}/lib", root)))
+    // Use new whisper-specific environment variables from ggml-rs
+    // ggml-rs now exports: DEP_GGML_RS_GGML_WHISPER_LIB_DIR, DEP_GGML_RS_GGML_WHISPER_BIN_DIR, DEP_GGML_RS_GGML_WHISPER_BASENAME
+    let ggml_lib_dir = env::var("DEP_GGML_RS_GGML_WHISPER_LIB_DIR")
         .map(PathBuf::from)
         .ok();
-    let ggml_include_dir = env::var("DEP_GGML_RS_INCLUDE")
-        .or_else(|_| env::var("DEP_GGML_INCLUDE"))
-        .or_else(|_| env::var("DEP_GGML_RS_ROOT").map(|root| format!("{}/include", root)))
-        .or_else(|_| env::var("DEP_GGML_ROOT").map(|root| format!("{}/include", root)))
+    let ggml_bin_dir = env::var("DEP_GGML_RS_GGML_WHISPER_BIN_DIR")
         .map(PathBuf::from)
         .ok();
+    let ggml_lib_basename = env::var("DEP_GGML_RS_GGML_WHISPER_BASENAME")
+        .unwrap_or_else(|_| "ggml_whisper".to_string()); // Fallback to "ggml_whisper" if not set
+    let ggml_include_dir = if let Ok(include) = env::var("DEP_GGML_RS_GGML_WHISPER_INCLUDE") {
+        Some(PathBuf::from(include))
+    } else if let Ok(include) = env::var("DEP_GGML_RS_INCLUDE") {
+        Some(PathBuf::from(include))
+    } else if let Ok(include) = env::var("DEP_GGML_INCLUDE") {
+        Some(PathBuf::from(include))
+    } else {
+        ggml_lib_dir.as_ref().and_then(|lib_dir| {
+            lib_dir.parent().map(|p| PathBuf::from(format!("{}/include", p.display())))
+        })
+    };
     // ggml_prefix will be recalculated later when needed for CMake
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -268,7 +276,7 @@ fn main() {
             if let Some(ref include_dir) = ggml_include_dir {
                 bindings_builder = bindings_builder.clang_arg(format!("-I{}", include_dir.display()));
             } else {
-                panic!("use-shared-ggml feature is enabled but DEP_GGML_RS_INCLUDE or DEP_GGML_RS_ROOT is not set. Make sure ggml-rs is properly configured and built with the namespace-whisper feature.");
+                panic!("use-shared-ggml feature is enabled but DEP_GGML_RS_GGML_WHISPER_LIB_DIR is not set. Make sure ggml-rs is properly configured and built.");
             }
         } else {
             bindings_builder = bindings_builder.clang_arg(format!("-I{}", whisper_cpp_source.join("ggml/include").display()));
@@ -306,13 +314,16 @@ fn main() {
 
     // If use-shared-ggml feature is enabled, skip building ggml and link to shared library
     if cfg!(feature = "use-shared-ggml") {
-        // IMPORTANT: We need to link to the namespaced GGML libraries explicitly
-        // When namespace-whisper is enabled (which it is by default with use-shared-ggml),
-        // libraries are named ggml_whisper, ggml_whisper-base, ggml_whisper-cpu, etc.
+        // IMPORTANT: We need to link to the whisper-specific GGML libraries explicitly
+        // ggml-rs now builds both variants (whisper and llama) unconditionally
+        // Libraries are named using the basename from DEP_GGML_RS_GGML_WHISPER_BASENAME
+        // (typically "ggml_whisper", "ggml_whisper-base", "ggml_whisper-cpu", "ggml_whisper-cuda", etc.)
+        // When CUDA is enabled on ggml-rs, it builds ggml_whisper-cuda and places it in LIB_DIR
         // ggml-rs builds these libraries but doesn't link them for dependent crates
-        let lib_base_name = "ggml_whisper";
+        // We link them here based on what's available in the LIB_DIR
+        let lib_base_name = &ggml_lib_basename;
         
-        println!("cargo:warning=[GGML] Using namespaced GGML libraries: {}", lib_base_name);
+        println!("cargo:warning=[GGML] Using whisper-specific GGML libraries with basename: {}", lib_base_name);
         
         // Add library search path (ggml-rs already links the libraries)
         if let Some(ref lib_dir) = ggml_lib_dir {
@@ -334,12 +345,8 @@ fn main() {
             .pic(true);
         
         // CRITICAL: Tell CMake where to find ggml
-        // Use DEP_GGML_RS_ROOT or DEP_GGML_ROOT if available, otherwise construct from lib_dir
-        let ggml_prefix = env::var("DEP_GGML_RS_ROOT")
-            .or_else(|_| env::var("DEP_GGML_ROOT"))
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| ggml_lib_dir.as_ref().and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf())));
+        // Construct prefix from lib_dir (ggml-rs installs to separate directories per variant)
+        let ggml_prefix = ggml_lib_dir.as_ref().and_then(|lib_dir| lib_dir.parent().map(|p| p.to_path_buf()));
         
         if let Some(ref prefix) = ggml_prefix {
             // Set CMAKE_PREFIX_PATH to where ggml-rs installed ggml
@@ -434,10 +441,10 @@ fn main() {
             
             if namespaced_lib.exists() {
                 config.define("GGML_LIBRARY", namespaced_lib.to_str().unwrap());
-                println!("cargo:warning=[GGML] Setting GGML_LIBRARY to namespaced library: {}", namespaced_lib.display());
+                println!("cargo:warning=[GGML] Setting GGML_LIBRARY to whisper-specific library: {}", namespaced_lib.display());
             } else {
                 config.define("GGML_LIB_DIR", lib_dir.to_str().unwrap());
-                println!("cargo:warning=[GGML] Namespaced library not found at {}, using GGML_LIB_DIR", namespaced_lib.display());
+                println!("cargo:warning=[GGML] Whisper-specific library not found at {}, using GGML_LIB_DIR", namespaced_lib.display());
             }
         }
         
@@ -495,7 +502,11 @@ fn main() {
             println!("cargo:rustc-link-lib=dylib={}-cpu", lib_base_name);
             
             // Link feature-specific libraries if they exist (all whisper-specific: ggml_whisper-*)
+            // These libraries are built by ggml-rs when the corresponding features are enabled
+            // For example, if ggml-rs is built with "cuda" feature, it will build ggml_whisper-cuda
+            // and place it in DEP_GGML_RS_GGML_WHISPER_LIB_DIR
             // Check for CUDA (whisper-specific: ggml_whisper-cuda)
+            // Note: CUDA runtime libraries (cudart, cublas, etc.) are linked separately above
             let cuda_lib = if cfg!(target_os = "windows") {
                 lib_dir.join(format!("{}-cuda.lib", lib_base_name))
             } else if cfg!(target_os = "macos") {
@@ -505,6 +516,7 @@ fn main() {
             };
             if cuda_lib.exists() || lib_dir.join(format!("{}-cuda.dll", lib_base_name)).exists() {
                 println!("cargo:rustc-link-lib=dylib={}-cuda", lib_base_name);
+                println!("cargo:warning=[GGML] Linked whisper-specific CUDA library: {}-cuda", lib_base_name);
             }
             
             // Check for Vulkan (whisper-specific: ggml_whisper-vulkan)
@@ -572,11 +584,13 @@ fn main() {
             }
         }
         
-        // On Windows, copy namespace-specific GGML DLLs to the target directory for runtime
+        // On Windows, copy whisper-specific GGML DLLs to the target directory for runtime
         // All DLLs are whisper-specific: ggml_whisper.dll, ggml_whisper-base.dll, etc.
+        // Use BIN_DIR if available (from DEP_GGML_RS_GGML_WHISPER_BIN_DIR), otherwise fall back to LIB_DIR
         if cfg!(target_os = "windows") && cfg!(feature = "use-shared-ggml") {
-            if let Some(ref lib_dir) = ggml_lib_dir {
-                copy_namespace_dlls_to_target(lib_dir, lib_base_name);
+            let dll_source_dir = ggml_bin_dir.as_ref().or(ggml_lib_dir.as_ref());
+            if let Some(ref dll_dir) = dll_source_dir {
+                copy_namespace_dlls_to_target(dll_dir, lib_base_name);
             }
         }
         
@@ -798,10 +812,11 @@ fn get_whisper_cpp_version(whisper_root: &std::path::Path) -> std::io::Result<Op
     Ok(None)
 }
 
-/// Copy namespace-specific GGML DLLs to the target directory for runtime on Windows
-/// For whisper-rs, lib_base_name should be "ggml_whisper" (whisper-specific)
+/// Copy whisper-specific GGML DLLs to the target directory for runtime on Windows
+/// lib_base_name comes from DEP_GGML_RS_GGML_WHISPER_BASENAME (typically "ggml_whisper")
 /// This copies DLLs like: ggml_whisper.dll, ggml_whisper-base.dll, ggml_whisper-cpu.dll, etc.
-fn copy_namespace_dlls_to_target(lib_dir: &PathBuf, lib_base_name: &str) {
+/// dll_dir should be from DEP_GGML_RS_GGML_WHISPER_BIN_DIR (or LIB_DIR as fallback)
+fn copy_namespace_dlls_to_target(dll_dir: &PathBuf, lib_base_name: &str) {
     let target_dir = env::var("OUT_DIR")
         .ok()
         .and_then(|out| {
@@ -829,7 +844,7 @@ fn copy_namespace_dlls_to_target(lib_dir: &PathBuf, lib_base_name: &str) {
         
         for lib_name in &libraries {
             let dll_name = format!("{}.dll", lib_name);
-            let src = lib_dir.join(&dll_name);
+            let src = dll_dir.join(&dll_name);
             if src.exists() {
                 let dst = target.join(&dll_name);
                 if let Err(e) = std::fs::copy(&src, &dst) {
