@@ -371,23 +371,53 @@ fn main() {
                 .or_else(|| lib_dir.parent().map(|p| p.join("lib").join("cmake").join("ggml")));
             
             // Try to patch ggml-config.cmake to use the namespaced library name
+            // This is a workaround for the fact that ggml-config.cmake hardcodes "ggml"
+            // We need to replace ALL library names: ggml, ggml-base, ggml-cpu, ggml-cuda, etc.
             if let Some(ref cmake_dir) = ggml_cmake_dir {
                 let config_file = cmake_dir.join("ggml-config.cmake");
                 if config_file.exists() {
                     // Read the config file
                     if let Ok(mut contents) = std::fs::read_to_string(&config_file) {
-                        // Replace find_library calls that look for "ggml" with "ggml_whisper"
-                        // This is a workaround for the fact that ggml-config.cmake hardcodes "ggml"
+                        // List of all component library names that need to be namespaced
+                        let component_libs = vec![
+                            "ggml-base",
+                            "ggml-cpu",
+                            "ggml-cuda",
+                            "ggml-vulkan",
+                            "ggml-metal",
+                            "ggml-hip",
+                            "ggml-blas",
+                            "ggml-sycl",
+                        ];
+                        
+                        // Replace all component library names FIRST (before main library)
+                        // This ensures we don't accidentally replace "ggml" inside "ggml-base"
+                        for component in &component_libs {
+                            let namespaced = format!("{}-{}", lib_base_name, &component[5..]); // "ggml_whisper-base" from "ggml-base"
+                            // Replace all occurrences of the component library name
+                            // This handles: find_library(GGML_BASE_LIBRARY ggml-base, NAMES ggml-base, etc.
+                            contents = contents.replace(component, &namespaced);
+                        }
+                        
+                        // Now replace the main library name in find_library calls
+                        // Replace "ggml" with "ggml_whisper" in NAMES clauses
                         contents = contents.replace("find_library(GGML_LIBRARY NAMES ggml", 
                             &format!("find_library(GGML_LIBRARY NAMES {} ggml", lib_base_name));
-                        contents = contents.replace("NAMES ggml", 
-                            &format!("NAMES {} ggml", lib_base_name));
+                        contents = contents.replace("find_library(GGML_LIBRARY ggml", 
+                            &format!("find_library(GGML_LIBRARY {} ggml", lib_base_name));
+                        contents = contents.replace("NAMES ggml\"", 
+                            &format!("NAMES {} ggml\"", lib_base_name));
+                        contents = contents.replace("NAMES ggml ", 
+                            &format!("NAMES {} ggml ", lib_base_name));
+                        // Also handle cases where ggml appears alone (not in NAMES)
+                        contents = contents.replace(" ggml\"", &format!(" {} ggml\"", lib_base_name));
+                        contents = contents.replace(" ggml ", &format!(" {} ggml ", lib_base_name));
                         
                         // Write the patched config back
                         if let Err(e) = std::fs::write(&config_file, contents) {
                             println!("cargo:warning=[GGML] Failed to patch ggml-config.cmake: {}", e);
                         } else {
-                            println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced library: {}", lib_base_name);
+                            println!("cargo:warning=[GGML] Patched ggml-config.cmake to use namespaced libraries: {}", lib_base_name);
                         }
                     }
                 }
